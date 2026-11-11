@@ -1,0 +1,5 @@
+*.exe
+*.bak-*
+settings.ini
+*.ini
+__pycache__/
