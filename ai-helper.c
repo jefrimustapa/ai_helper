@@ -39,11 +39,11 @@
 #define WM_TRAY         (WM_APP + 2)
 
 enum {
-    ID_AUTOSTART = 100, ID_PORT, ID_LIST, ID_ADD, ID_REMOVE, ID_SAVE, ID_STATUS,
+    ID_AUTOSTART = 100, ID_PORT, ID_LIST, ID_ADD, ID_REMOVE, ID_SAVE, ID_STATUS, ID_BRIDGE,
     ID_TRAY_SHOW = 200, ID_TRAY_EXIT
 };
 
-static HWND  g_hwnd, g_chkAuto, g_edPort, g_list, g_status;
+static HWND  g_hwnd, g_chkAuto, g_chkBridge, g_edPort, g_list, g_status;
 static wchar_t g_ini[MAX_PATH];
 static wchar_t g_exe[MAX_PATH];
 
@@ -119,6 +119,7 @@ typedef BOOLEAN (WINAPI *RTLGENRANDOM)(PVOID, ULONG);
 static int token_generate(char *out)
 {
     unsigned char rnd[TOKEN_LEN / 2];
+    if (getenv("AIHELPER_TEST_NORNG")) return 0;     /* test hook: simulate RNG failure */
     RTLGENRANDOM f = (RTLGENRANDOM)GetProcAddress(LoadLibraryW(L"advapi32.dll"), "SystemFunction036");
     if (!f || !f(rnd, sizeof rnd)) return 0;
     for (int i = 0; i < (int)sizeof rnd; i++) sprintf(out + 2 * i, "%02x", rnd[i]);
@@ -689,6 +690,20 @@ static void on_remove(void)
     if (sel != LB_ERR) SendMessageW(g_list, LB_DELETESTRING, sel, 0);
 }
 
+/* Applies the 'Enable HTTP bridge' checkbox: updates g_bridgeOn under g_cs (effective at
+ * once, no restart) and persists only [Bridge] Enabled. Enabling is refused without a token.
+ * Returns 1 if the requested state was applied, 0 if ON was refused (no token). */
+static int bridge_set_enabled(int on)
+{
+    int ok = 1;
+    EnterCriticalSection(&g_cs);
+    if (on && !g_token[0]) { on = 0; ok = 0; }
+    g_bridgeOn = on;
+    LeaveCriticalSection(&g_cs);
+    WritePrivateProfileStringW(L"Bridge", L"Enabled", on ? L"1" : L"0", g_ini);
+    return ok;
+}
+
 static void on_save(HWND hwnd)
 {
     wchar_t buf[16];
@@ -712,8 +727,14 @@ static void on_save(HWND hwnd)
     config_save();
     if (!g_testMode)
         autostart_set(SendMessageW(g_chkAuto, BM_GETCHECK, 0, 0) == BST_CHECKED);
+    int bridgeOk = bridge_set_enabled(SendMessageW(g_chkBridge, BM_GETCHECK, 0, 0) == BST_CHECKED);
     server_start(g_port);
-    set_status(L"Saved. Restarting listener...");
+    if (bridgeOk) {
+        set_status(L"Saved. Restarting listener...");
+    } else {
+        SendMessageW(g_chkBridge, BM_SETCHECK, BST_UNCHECKED, 0);
+        set_status(L"Saved. Bridge not enabled: no token");
+    }
 }
 
 /* ---------- DPI-aware layout ---------- */
@@ -799,6 +820,8 @@ static void layout(HWND hwnd)
     int y = m;
     MoveWindow(g_chkAuto, m, y, cw - 2 * m, row, TRUE);
     y += row + gap;
+    MoveWindow(g_chkBridge, m, y, cw - 2 * m, row, TRUE);
+    y += row + gap;
     MoveWindow(g_lblPort, m, y + S(4), S(200), row - S(4), TRUE);
     MoveWindow(g_edPort, m + S(200), y, S(80), edH, TRUE);
     y += edH + gap;
@@ -863,6 +886,7 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         g_hwnd = hwnd;
         g_dpi = dpi_of(hwnd);
         g_chkAuto = make(hwnd, L"BUTTON", L"Start with Windows", BS_AUTOCHECKBOX | WS_TABSTOP, ID_AUTOSTART);
+        g_chkBridge = make(hwnd, L"BUTTON", L"Enable HTTP bridge (GET /open, clickable links)", BS_AUTOCHECKBOX | WS_TABSTOP, ID_BRIDGE);
         g_lblPort = make(hwnd, L"STATIC", L"Listening port (127.0.0.1):", 0, 0);
         swprintf(port, 16, L"%d", g_port);
         g_edPort = make(hwnd, L"EDIT", port, ES_NUMBER | ES_AUTOHSCROLL | WS_TABSTOP, ID_PORT);
@@ -878,9 +902,15 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         font_rebuild(hwnd);
         layout(hwnd);
         SendMessageW(g_chkAuto, BM_SETCHECK, autostart_get() ? BST_CHECKED : BST_UNCHECKED, 0);
+        EnterCriticalSection(&g_cs);
+        int bOn = g_bridgeOn, bTok = g_token[0] != 0;
+        LeaveCriticalSection(&g_cs);
+        SendMessageW(g_chkBridge, BM_SETCHECK, bOn ? BST_CHECKED : BST_UNCHECKED, 0);
+        if (!bTok) EnableWindow(g_chkBridge, FALSE);
         list_fill();
         tray_add(hwnd);
         server_start(g_port);
+        if (!bTok) set_status(L"Bridge unavailable: no token (RNG failed)");
         return 0;
     }
     case WM_SIZE:
@@ -888,7 +918,7 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         return 0;
     case WM_GETMINMAXINFO: {
         MINMAXINFO *mm = (MINMAXINFO *)lp;
-        RECT r = {0, 0, S(400), S(360)};
+        RECT r = {0, 0, S(400), S(395)};
         adjust_rect(&r, WS_OVERLAPPEDWINDOW);
         mm->ptMinTrackSize.x = r.right - r.left;
         mm->ptMinTrackSize.y = r.bottom - r.top;
@@ -913,9 +943,13 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         }
         return 0;
     case WM_SERVER_STATE: {
-        wchar_t t[128];
-        if (wp) swprintf(t, 128, L"Listening on 127.0.0.1:%d", (int)lp);
-        else    swprintf(t, 128, L"Cannot listen (Winsock error %d)", (int)lp);
+        wchar_t t[160];
+        EnterCriticalSection(&g_cs);
+        int noTok = !g_token[0];
+        LeaveCriticalSection(&g_cs);
+        if (wp) swprintf(t, 160, L"Listening on 127.0.0.1:%d%ls", (int)lp,
+                         noTok ? L" - bridge unavailable: no token" : L"");
+        else    swprintf(t, 160, L"Cannot listen (Winsock error %d)", (int)lp);
         set_status(t);
         return 0;
     }

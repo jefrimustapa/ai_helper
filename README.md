@@ -26,7 +26,7 @@ http://127.0.0.1:5055/open?path=D%3A%5Cai_project%5Cpaperclip_setup&token=<token
 
 Use `127.0.0.1`, not `localhost` (the helper binds IPv4 only). The first line of a connection starting with `GET ` is served as HTTP; anything else is the old one-line protocol, unchanged.
 
-**Off by default.** Config is the `[Bridge]` section of `%APPDATA%\AiHelper\settings.ini` (read at start-up; restart the helper after editing):
+**Off by default.** Switch it on in Settings: tick **Enable HTTP bridge** and press **Save**. It takes effect immediately (no restart) and only `Enabled=` in `settings.ini` is rewritten (Token and Root entries are never touched by the UI). If there is no token (random generator failed) the box is disabled and the bridge stays closed. The `[Bridge]` section of `%APPDATA%\AiHelper\settings.ini` can still be edited by hand (read at start-up; restart the helper after editing):
 
 ```ini
 [Bridge]
@@ -44,4 +44,4 @@ Root1=...
 
 ## Tests
 
-`tests/test_bridge.py <exe> [port]` runs a throw-away instance (own ini, random token, other port, no registry writes, Explorer launch stubbed) and checks positives, negatives, boundary values, fuzzed paths/requests and that the old protocol still works. `tests/mutate.py [port] [lo] [hi]` (run in batches of ~3 mutants, ~60s each) breaks one check at a time and requires the tests to fail for every mutant. Test instance flags: `ai-helper.exe /port:5071 /ini:C:\path\test.ini`; env `AIHELPER_TEST_NOLAUNCH=1` makes `/open` reply `would-launch:open` (folder) or `would-launch:select` (file) instead of starting Explorer.
+`tests/test_bridge.py <exe> [port]` runs a throw-away instance (own ini, random token, other port, no registry writes, Explorer launch stubbed) and checks positives, negatives, boundary values, fuzzed paths/requests and that the old protocol still works. `tests/test_ui_toggle.py <exe> [port] [shot.png]` drives the Settings checkbox with pywinauto (env `AIHELPER_TEST_NORNG=1` simulates a failed RNG). `tests/mutate.py [port] [lo] [hi]` (run in batches of ~3 mutants, ~60s each) breaks one check at a time and requires the tests to fail for every mutant. Test instance flags: `ai-helper.exe /port:5071 /ini:C:\path\test.ini`; env `AIHELPER_TEST_NOLAUNCH=1` makes `/open` reply `would-launch:open` (folder) or `would-launch:select` (file) instead of starting Explorer.
