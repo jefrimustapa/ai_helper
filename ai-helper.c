@@ -515,9 +515,9 @@ static void handle_http(SOCKET c, char *req)
     }
     /* 3. Sec-Fetch-Site: same-origin / same-site / cross-site accepted (cross-site = a click from
        Paperclip on another origin; step 2 already guarantees a user-click top-level navigation).
-       "none" (typed/bookmarked URL) and a missing header are refused. */
+       "none" (link opened from outside a web page, e.g. a desktop shell) is accepted only together with step 2 and the token; a missing header is refused. */
     if (hdr_get(req, "Sec-Fetch-Site", val, sizeof val) != 1 ||
-        (strcmp(val, "same-site") != 0 && strcmp(val, "same-origin") != 0 && strcmp(val, "cross-site") != 0)) {
+        (strcmp(val, "same-site") != 0 && strcmp(val, "same-origin") != 0 && strcmp(val, "cross-site") != 0 && strcmp(val, "none") != 0)) {
         HTTP_FAIL(403, "Forbidden", "bad fetch site"); return;
     }
     /* 4. token */
