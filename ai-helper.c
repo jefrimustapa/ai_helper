@@ -513,9 +513,11 @@ static void handle_http(SOCKET c, char *req)
         hdr_get(req, "Sec-Fetch-Dest", val, sizeof val) != 1 || strcmp(val, "document") != 0) {
         HTTP_FAIL(403, "Forbidden", "not a user navigation"); return;
     }
-    /* 3. same-site / same-origin only (cross-site and none are refused) */
+    /* 3. Sec-Fetch-Site: same-origin / same-site / cross-site accepted (cross-site = a click from
+       Paperclip on another origin; step 2 already guarantees a user-click top-level navigation).
+       "none" (typed/bookmarked URL) and a missing header are refused. */
     if (hdr_get(req, "Sec-Fetch-Site", val, sizeof val) != 1 ||
-        (strcmp(val, "same-site") != 0 && strcmp(val, "same-origin") != 0)) {
+        (strcmp(val, "same-site") != 0 && strcmp(val, "same-origin") != 0 && strcmp(val, "cross-site") != 0)) {
         HTTP_FAIL(403, "Forbidden", "bad fetch site"); return;
     }
     /* 4. token */
