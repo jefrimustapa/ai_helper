@@ -31,12 +31,21 @@ M = [
     ("window.close removed", 'window.close()', 'void(0)'),
     ("legacy: GET detection loosened", 'strncmp(buf, "GET ", 4) == 0) {', 'strncmp(buf, "GET", 3) == 0) {'),
     ("file launched directly (no /select)", 'L"/select,\\"%ls\\""', 'L"\\"%ls\\""'),
+    # COH-491: Settings UI checkbox (killed by test_ui_toggle.py)
+    ("ui: Save does not write Enabled", 'WritePrivateProfileStringW(L"Bridge", L"Enabled", on ? L"1" : L"0", g_ini);', '', "ui"),
+    ("ui: Save always writes 1", 'on ? L"1" : L"0", g_ini);', 'L"1", g_ini);', "ui"),
+    ("ui: g_bridgeOn not updated by Save", 'g_bridgeOn = on;', '', "ui"),
+    ("ui: empty-token guard removed", 'if (on && !g_token[0]) { on = 0; ok = 0; }', '', "ui"),
+    ("ui: init checkbox inverted", 'bOn ? BST_CHECKED : BST_UNCHECKED', 'bOn ? BST_UNCHECKED : BST_CHECKED', "ui"),
+    ("ui: checkbox not disabled w/o token", 'if (!bTok) EnableWindow(g_chkBridge, FALSE);', '', "ui"),
+    ("ui: Save ignores checkbox", 'SendMessageW(g_chkBridge, BM_GETCHECK, 0, 0) == BST_CHECKED);', '1);', "ui"),
+    ("ui: refused enable leaves box checked", 'SendMessageW(g_chkBridge, BM_SETCHECK, BST_UNCHECKED, 0);', '', "ui"),
 ]
 
 res = []
 t0 = time.time()
 tmp = tempfile.mkdtemp(prefix="aih-mut-")
-for i, (name, old, new) in enumerate(M):
+for i, (name, old, new, *kind) in enumerate(M):
     if i < LO or (HI is not None and i >= HI):
         continue
     if src.count(old) != 1:
@@ -52,7 +61,8 @@ for i, (name, old, new) in enumerate(M):
         res.append((name, "BUILD-ERROR " + b.stderr[:100]))
     else:
         try:
-            t = subprocess.run([sys.executable, "-I", os.path.join(HERE, "test_bridge.py"), exe, PORT],
+            script = "test_ui_toggle.py" if kind else "test_bridge.py"
+            t = subprocess.run([sys.executable, "-I", os.path.join(HERE, script), exe, PORT],
                                capture_output=True, text=True, timeout=180)
             res.append((name, "killed" if t.returncode != 0 else "SURVIVED"))
         except subprocess.TimeoutExpired:
