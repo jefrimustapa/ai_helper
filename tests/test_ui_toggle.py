@@ -92,6 +92,9 @@ class Inst:
         win32gui.ShowWindow(self.h, win32con.SW_SHOW)
         time.sleep(0.3)
         self.w = Application(backend="win32").connect(handle=self.h).window(handle=self.h)
+        self.tab = self.w.child_window(class_name="SysTabControl32")
+        self.tab.select("Bridge")   # COH-517: bridge checkbox lives on the Bridge tab
+        time.sleep(0.2)
         self.chk = self.w.child_window(title_re="Enable HTTP bridge.*", class_name="Button")
         self.save = self.w.child_window(title="Save", class_name="Button")
 
@@ -99,8 +102,11 @@ class Inst:
         return self.chk.get_check_state() == 1
 
     def set_checked(self, v):
-        if self.checked() != v:
+        for _ in range(3):
+            if self.checked() == v:
+                return
             self.chk.click()
+            time.sleep(0.15)
 
     def do_save(self):
         self.save.click()
