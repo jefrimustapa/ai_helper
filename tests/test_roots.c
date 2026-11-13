@@ -60,6 +60,12 @@ int wmain(int argc, wchar_t **argv)
     }
     /* (d) duplicates */
     wcscpy(ex[0], d1);
+    {   /* existing entry stored non-canonically (upper case + trailing backslash, as an old ini might hold) */
+        wchar_t raw[MAX_PATH];
+        swprintf(raw, MAX_PATH, L"%ls\\", d1); _wcsupr(raw); wcscpy(ex[0], raw);
+        check("d fail: duplicate of non-canonical existing entry", !ok(d1, 1));
+        wcscpy(ex[0], d1);
+    }
     check("d fail: duplicate", !ok(d1, 1));
     {
         wchar_t up[MAX_PATH]; wcscpy(up, d1); _wcsupr(up);
