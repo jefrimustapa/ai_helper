@@ -24,6 +24,8 @@
 #include <shellapi.h>
 #include <shlobj.h>
 #include <commdlg.h>
+#include <commctrl.h>
+#include <shobjidl.h>
 #include <stdio.h>
 #include <wchar.h>
 
@@ -40,10 +42,11 @@
 
 enum {
     ID_AUTOSTART = 100, ID_PORT, ID_LIST, ID_ADD, ID_REMOVE, ID_SAVE, ID_STATUS, ID_BRIDGE,
+    ID_TAB, ID_ROOTLIST, ID_ROOTADD, ID_ROOTREMOVE,
     ID_TRAY_SHOW = 200, ID_TRAY_EXIT
 };
 
-static HWND  g_hwnd, g_chkAuto, g_chkBridge, g_edPort, g_list, g_status;
+static HWND  g_hwnd, g_chkAuto, g_chkBridge, g_edPort, g_list, g_status, g_tab, g_rootList;
 static wchar_t g_ini[MAX_PATH];
 static wchar_t g_exe[MAX_PATH];
 
@@ -665,6 +668,113 @@ static void list_fill(void)
     LeaveCriticalSection(&g_cs);
 }
 
+/* ---------- bridge folders (COH-517) ---------- */
+
+/* Decision/security function: validates a candidate bridge root. existing[0..n) are the
+ * folders already in the list. Returns NULL and fills canon (canonical form) if acceptable,
+ * else a human-readable reason. (a) drive-absolute, not UNC/relative; (b) exists and is a
+ * folder; (c) not a drive root; (d) not a duplicate; (e) room left (< MAX_ROOTS). */
+static const wchar_t *root_validate(const wchar_t *path, wchar_t *canon,
+                                    wchar_t (*existing)[MAX_PATH], int n)
+{
+    wchar_t c[MAX_PATH];
+    if (!path || !path[0]) return L"No folder selected.";
+    if (path[0] == L'\\' && path[1] == L'\\') return L"Network (UNC) folders are not allowed.";
+    if (!((path[0] >= L'A' && path[0] <= L'Z') || (path[0] >= L'a' && path[0] <= L'z')) ||
+        path[1] != L':' || path[2] != L'\\')
+        return L"Folder must be an absolute local path such as D:\\folder.";
+    if (!canon_path(path, c, MAX_PATH)) return L"Folder does not exist or is not accessible.";
+    DWORD at = GetFileAttributesW(c);
+    if (at == INVALID_FILE_ATTRIBUTES || !(at & FILE_ATTRIBUTE_DIRECTORY))
+        return L"Selected path is not a folder.";
+    if (wcslen(c) <= 3) return L"A whole drive (for example C:\\ or D:\\) is not allowed. Pick a folder.";
+    for (int i = 0; i < n; i++) {
+        wchar_t e[MAX_PATH];
+        if (!canon_path(existing[i], e, MAX_PATH)) wcscpy(e, existing[i]);
+        if (_wcsicmp(e, c) == 0) return L"This folder is already in the list.";
+    }
+    if (n >= MAX_ROOTS) return L"Folder list is full (maximum 16).";
+    wcscpy(canon, c);
+    return NULL;
+}
+
+static int roots_collect(wchar_t (*out)[MAX_PATH])
+{
+    LRESULT cnt = SendMessageW(g_rootList, LB_GETCOUNT, 0, 0);
+    int k = 0;
+    for (int i = 0; i < cnt && k < MAX_ROOTS; i++)
+        if (SendMessageW(g_rootList, LB_GETTEXTLEN, i, 0) < MAX_PATH)
+            SendMessageW(g_rootList, LB_GETTEXT, i, (LPARAM)out[k++]);
+    return k;
+}
+
+static void roots_fill(void)
+{
+    SendMessageW(g_rootList, LB_RESETCONTENT, 0, 0);
+    EnterCriticalSection(&g_cs);
+    for (int i = 0; i < g_rootCount; i++)
+        SendMessageW(g_rootList, LB_ADDSTRING, 0, (LPARAM)g_roots[i]);
+    LeaveCriticalSection(&g_cs);
+}
+
+/* Applies the list: swap into g_roots under g_cs (no I/O inside the lock), then persist
+ * [Bridge] Root0..RootN and delete surplus slots. Effective at once, no restart. */
+static void roots_apply(void)
+{
+    static wchar_t loc[MAX_ROOTS][MAX_PATH];
+    wchar_t key[32];
+    int n = roots_collect(loc);
+    EnterCriticalSection(&g_cs);
+    for (int i = 0; i < n; i++) wcscpy(g_roots[i], loc[i]);
+    g_rootCount = n;
+    LeaveCriticalSection(&g_cs);
+    for (int i = 0; i < MAX_ROOTS; i++) {
+        swprintf(key, 32, L"Root%d", i);
+        WritePrivateProfileStringW(L"Bridge", key, i < n ? loc[i] : NULL, g_ini);
+    }
+}
+
+static int pick_folder(HWND owner, wchar_t *out)
+{
+    IFileOpenDialog *d = NULL;
+    int ok = 0;
+    if (FAILED(CoCreateInstance(&CLSID_FileOpenDialog, NULL, CLSCTX_INPROC_SERVER,
+                                &IID_IFileOpenDialog, (void **)&d))) return 0;
+    DWORD o = 0;
+    d->lpVtbl->GetOptions(d, &o);
+    d->lpVtbl->SetOptions(d, o | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST);
+    d->lpVtbl->SetTitle(d, L"Add bridge folder");
+    if (SUCCEEDED(d->lpVtbl->Show(d, owner))) {
+        IShellItem *it = NULL;
+        if (SUCCEEDED(d->lpVtbl->GetResult(d, &it))) {
+            PWSTR p = NULL;
+            if (SUCCEEDED(it->lpVtbl->GetDisplayName(it, SIGDN_FILESYSPATH, &p))) {
+                if (wcslen(p) < MAX_PATH) { wcscpy(out, p); ok = 1; }
+                CoTaskMemFree(p);
+            }
+            it->lpVtbl->Release(it);
+        }
+    }
+    d->lpVtbl->Release(d);
+    return ok;
+}
+
+static void on_root_add(HWND hwnd)
+{
+    static wchar_t ex[MAX_ROOTS][MAX_PATH];
+    wchar_t picked[MAX_PATH], canon[MAX_PATH];
+    if (!pick_folder(hwnd, picked)) return;
+    const wchar_t *why = root_validate(picked, canon, ex, roots_collect(ex));
+    if (why) { MessageBoxW(hwnd, why, APP_NAME, MB_OK | MB_ICONWARNING); return; }
+    SendMessageW(g_rootList, LB_ADDSTRING, 0, (LPARAM)canon);
+}
+
+static void on_root_remove(void)
+{
+    LRESULT sel = SendMessageW(g_rootList, LB_GETCURSEL, 0, 0);
+    if (sel != LB_ERR) SendMessageW(g_rootList, LB_DELETESTRING, sel, 0);
+}
+
 static void on_add(HWND hwnd)
 {
     wchar_t file[MAX_PATH] = L"";
@@ -725,6 +835,7 @@ static void on_save(HWND hwnd)
     }
     LeaveCriticalSection(&g_cs);
 
+    roots_apply();
     g_port = port;
     config_save();
     if (!g_testMode)
@@ -811,6 +922,18 @@ static void font_rebuild(HWND hwnd)
     g_font = nf;
 }
 
+static HWND g_lblRoots, g_lblRootNote, g_btnRootAdd, g_btnRootRemove;
+
+static void tab_show(void)
+{
+    int br = (int)SendMessageW(g_tab, TCM_GETCURSEL, 0, 0) == 1;
+    HWND gen[] = {g_chkAuto, g_lblPort, g_edPort, g_lblApps, g_list, g_btnAdd, g_btnRemove, g_lblHelp};
+    HWND bri[] = {g_chkBridge, g_lblRoots, g_rootList, g_btnRootAdd, g_btnRootRemove, g_lblRootNote};
+    for (size_t k = 0; k < sizeof gen / sizeof *gen; k++) ShowWindow(gen[k], br ? SW_HIDE : SW_SHOW);
+    for (size_t k = 0; k < sizeof bri / sizeof *bri; k++) ShowWindow(bri[k], br ? SW_SHOW : SW_HIDE);
+    RedrawWindow(g_hwnd, NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+}
+
 /* Position every control from the current client size and DPI. */
 static void layout(HWND hwnd)
 {
@@ -819,35 +942,60 @@ static void layout(HWND hwnd)
     int cw = rc.right, ch = rc.bottom;
     int m = S(12), row = S(24), edH = S(26), btnW = S(88), btnH = S(28), gap = S(8);
 
-    int y = m;
-    MoveWindow(g_chkAuto, m, y, cw - 2 * m, row, TRUE);
-    y += row + gap;
-    MoveWindow(g_chkBridge, m, y, cw - 2 * m, row, TRUE);
-    y += row + gap;
-    MoveWindow(g_lblPort, m, y + S(4), S(200), row - S(4), TRUE);
-    MoveWindow(g_edPort, m + S(200), y, S(80), edH, TRUE);
-    y += edH + gap;
-    MoveWindow(g_lblApps, m, y, cw - 2 * m, row - S(4), TRUE);
-    y += row - S(4) + S(2);
-
-    /* bottom-up: Save/status, help text, Add/Remove; the list takes what is left */
+    /* Save/status stay below the tabs (one Save for both pages) */
     int by = ch - m - btnH;
     MoveWindow(g_btnSave, cw - m - btnW, by, btnW, btnH, TRUE);
     MoveWindow(g_status, m, by + S(6), cw - 2 * m - btnW - gap, btnH - S(6), TRUE);
-    int hy = by - gap - S(40);
-    MoveWindow(g_lblHelp, m, hy, cw - 2 * m, S(40), TRUE);
+
+    int tb = by - gap;
+    MoveWindow(g_tab, m, m, cw - 2 * m, tb - m, TRUE);
+    RECT r = {m, m, cw - m, tb};
+    SendMessageW(g_tab, TCM_ADJUSTRECT, FALSE, (LPARAM)&r);
+    int x0 = r.left + gap, w = r.right - r.left - 2 * gap, yb = r.bottom - gap;
+
+    /* General page */
+    int y = r.top + gap;
+    MoveWindow(g_chkAuto, x0, y, w, row, TRUE);
+    y += row + gap;
+    MoveWindow(g_lblPort, x0, y + S(4), S(200), row - S(4), TRUE);
+    MoveWindow(g_edPort, x0 + S(200), y, S(80), edH, TRUE);
+    y += edH + gap;
+    MoveWindow(g_lblApps, x0, y, w, row - S(4), TRUE);
+    y += row - S(4) + S(2);
+    int hy = yb - S(40);
+    MoveWindow(g_lblHelp, x0, hy, w, S(40), TRUE);
     int ay = hy - gap - btnH;
-    MoveWindow(g_btnAdd, m, ay, btnW, btnH, TRUE);
-    MoveWindow(g_btnRemove, m + btnW + gap, ay, btnW, btnH, TRUE);
+    MoveWindow(g_btnAdd, x0, ay, btnW, btnH, TRUE);
+    MoveWindow(g_btnRemove, x0 + btnW + gap, ay, btnW, btnH, TRUE);
     int lh = ay - gap - y;
     if (lh < S(40)) lh = S(40);
-    MoveWindow(g_list, m, y, cw - 2 * m, lh, TRUE);
+    MoveWindow(g_list, x0, y, w, lh, TRUE);
+
+    /* Bridge page */
+    int bw = S(110);
+    y = r.top + gap;
+    MoveWindow(g_chkBridge, x0, y, w, row, TRUE);
+    y += row + gap;
+    MoveWindow(g_lblRoots, x0, y, w, row - S(4), TRUE);
+    y += row - S(4) + S(2);
+    int ny = yb - S(34);
+    MoveWindow(g_lblRootNote, x0, ny, w, S(34), TRUE);
+    int rh = ny - gap - y;
+    if (rh < S(40)) rh = S(40);
+    MoveWindow(g_rootList, x0, y, w - bw - gap, rh, TRUE);
+    MoveWindow(g_btnRootAdd, x0 + w - bw, y, bw, btnH, TRUE);
+    MoveWindow(g_btnRootRemove, x0 + w - bw, y + btnH + gap, bw, btnH, TRUE);
+
+    /* tab stays at the bottom of the z-order so page controls are never painted over;
+     * full redraw (children too) avoids stale edges/ghosts while the window is dragged */
+    SetWindowPos(g_tab, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    RedrawWindow(hwnd, NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
 }
 
 static HWND make(HWND parent, const wchar_t *cls, const wchar_t *text, DWORD style, int id)
 {
     return CreateWindowExW(cls[0] == L'E' || cls[0] == L'L' ? WS_EX_CLIENTEDGE : 0,
-                           cls, text, WS_CHILD | WS_VISIBLE | style, 0, 0, 0, 0,
+                           cls, text, WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | style, 0, 0, 0, 0,
                            parent, (HMENU)(INT_PTR)id, GetModuleHandleW(NULL), NULL);
 }
 
@@ -887,6 +1035,15 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         wchar_t port[16];
         g_hwnd = hwnd;
         g_dpi = dpi_of(hwnd);
+        g_tab = make(hwnd, WC_TABCONTROLW, L"", WS_TABSTOP | WS_CLIPSIBLINGS, ID_TAB);
+        {
+            TCITEMW ti = {0};
+            ti.mask = TCIF_TEXT;
+            ti.pszText = L"General";
+            SendMessageW(g_tab, TCM_INSERTITEMW, 0, (LPARAM)&ti);
+            ti.pszText = L"Bridge";
+            SendMessageW(g_tab, TCM_INSERTITEMW, 1, (LPARAM)&ti);
+        }
         g_chkAuto = make(hwnd, L"BUTTON", L"Start with Windows", BS_AUTOCHECKBOX | WS_TABSTOP, ID_AUTOSTART);
         g_chkBridge = make(hwnd, L"BUTTON", L"Enable HTTP bridge (GET /open, clickable links)", BS_AUTOCHECKBOX | WS_TABSTOP, ID_BRIDGE);
         g_lblPort = make(hwnd, L"STATIC", L"Listening port (127.0.0.1):", 0, 0);
@@ -897,6 +1054,11 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         g_list = make(hwnd, L"LISTBOX", L"", LBS_NOTIFY | LBS_NOINTEGRALHEIGHT | WS_VSCROLL | WS_TABSTOP, ID_LIST);
         g_btnAdd = make(hwnd, L"BUTTON", L"Add...", BS_PUSHBUTTON | WS_TABSTOP, ID_ADD);
         g_btnRemove = make(hwnd, L"BUTTON", L"Remove", BS_PUSHBUTTON | WS_TABSTOP, ID_REMOVE);
+        g_lblRoots = make(hwnd, L"STATIC", L"Bridge folders (files under these can be opened):", 0, 0);
+        g_rootList = make(hwnd, L"LISTBOX", L"", LBS_NOTIFY | LBS_NOINTEGRALHEIGHT | WS_VSCROLL | WS_TABSTOP, ID_ROOTLIST);
+        g_btnRootAdd = make(hwnd, L"BUTTON", L"Add folder...", BS_PUSHBUTTON | WS_TABSTOP, ID_ROOTADD);
+        g_btnRootRemove = make(hwnd, L"BUTTON", L"Remove", BS_PUSHBUTTON | WS_TABSTOP, ID_ROOTREMOVE);
+        g_lblRootNote = make(hwnd, L"STATIC", L"Whole drives (C:\\, D:\\) and network (UNC) folders are not allowed. Click Save to apply.", 0, 0);
         g_lblHelp = make(hwnd, L"STATIC", L"Send one line per connection:  <app> [params]\r\nExample:  explorer C:\\Temp", 0, 0);
         g_status = make(hwnd, L"STATIC", L"Starting...", 0, ID_STATUS);
         g_btnSave = make(hwnd, L"BUTTON", L"Save", BS_DEFPUSHBUTTON | WS_TABSTOP, ID_SAVE);
@@ -910,6 +1072,8 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         SendMessageW(g_chkBridge, BM_SETCHECK, bOn ? BST_CHECKED : BST_UNCHECKED, 0);
         if (!bTok) EnableWindow(g_chkBridge, FALSE);
         list_fill();
+        roots_fill();
+        tab_show();
         tray_add(hwnd);
         server_start(g_port);
         if (!bTok) set_status(L"Bridge unavailable: no token (RNG failed)");
@@ -920,7 +1084,7 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         return 0;
     case WM_GETMINMAXINFO: {
         MINMAXINFO *mm = (MINMAXINFO *)lp;
-        RECT r = {0, 0, S(400), S(395)};
+        RECT r = {0, 0, S(400), S(410)};
         adjust_rect(&r, WS_OVERLAPPEDWINDOW);
         mm->ptMinTrackSize.x = r.right - r.left;
         mm->ptMinTrackSize.y = r.bottom - r.top;
@@ -935,8 +1099,13 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         layout(hwnd);
         return 0;
     }
+    case WM_NOTIFY:
+        if (((NMHDR *)lp)->idFrom == ID_TAB && ((NMHDR *)lp)->code == TCN_SELCHANGE) tab_show();
+        return 0;
     case WM_COMMAND:
         switch (LOWORD(wp)) {
+        case ID_ROOTADD:        on_root_add(hwnd); break;
+        case ID_ROOTREMOVE:     on_root_remove(); break;
         case ID_ADD:            on_add(hwnd); break;
         case ID_REMOVE:         on_remove(); break;
         case ID_SAVE:           on_save(hwnd); break;
@@ -1004,6 +1173,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, PWSTR cmdLine, int nShow)
     }
 
     dpi_enable();       /* must happen before any window is created */
+    { INITCOMMONCONTROLSEX ic = { sizeof ic, ICC_TAB_CLASSES }; InitCommonControlsEx(&ic); }
+    CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
 
     HANDLE mutex = CreateMutexW(NULL, TRUE, mname);
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
@@ -1031,7 +1202,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, PWSTR cmdLine, int nShow)
     RegisterClassW(&wc);
 
     g_dpi = dpi_of(NULL);
-    RECT rc = {0, 0, S(460), S(420)};
+    RECT rc = {0, 0, S(460), S(440)};
     DWORD style = WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN;
     adjust_rect(&rc, style);
     HWND hwnd = CreateWindowW(wc.lpszClassName, L"AI Helper - Settings", style,
