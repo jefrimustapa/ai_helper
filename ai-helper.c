@@ -516,9 +516,12 @@ static void handle_http(SOCKET c, char *req)
         hdr_get(req, "Sec-Fetch-Dest", val, sizeof val) != 1 || strcmp(val, "document") != 0) {
         HTTP_FAIL(403, "Forbidden", "not a user navigation"); return;
     }
-    /* 3. same-site / same-origin only (cross-site and none are refused) */
+    /* 3. Sec-Fetch-Site: same-site / same-origin / cross-site accepted. cross-site is needed
+       when Paperclip is opened on another host (e.g. crew.lan:3100) and is safe only because
+       gates 1,2 (Host=127.0.0.1:port, Mode=navigate, User=?1, Dest=document) and 4-6 (token +
+       Root) still apply. "none" (typed URL/bookmark), missing and unknown values are refused. */
     if (hdr_get(req, "Sec-Fetch-Site", val, sizeof val) != 1 ||
-        (strcmp(val, "same-site") != 0 && strcmp(val, "same-origin") != 0)) {
+        (strcmp(val, "same-site") != 0 && strcmp(val, "same-origin") != 0 && strcmp(val, "cross-site") != 0)) {
         HTTP_FAIL(403, "Forbidden", "bad fetch site"); return;
     }
     /* 4. token */
