@@ -16,6 +16,23 @@ Run `ai-helper.exe`. The settings page has "Start with Windows", the listening p
 
 Send one line per connection: `<app> [params]`, e.g. `explorer C:\Temp`. The reply is `OK` or `ERR <reason>`. Only allowlisted apps can be launched.
 
+### Task Trigger: `task <task_name>`
+Runs a pre-registered scheduled task (via `schtasks /run /tn "<task_name>"`) silently in the background (`SW_HIDE`). Used by non-elevated agents to execute allowlisted elevated automation tasks without interactive UAC prompts.
+Allowlisted tasks are stored in `[Tasks]` in `%APPDATA%\AiHelper\settings.ini`:
+```ini
+[Tasks]
+Task0=PowerToolGovern
+Task1=CatoConnect
+```
+
+### IPC Bridge: `ipc <target> <message>`
+Sends a `WM_COPYDATA` message into an allowlisted window on the interactive desktop (`WinSta0\Default`). Used to relay commands across session boundaries to desktop apps (like `PowerToolWindow`) that accept UIPI-filtered messages.
+Allowlisted IPC targets are stored in `[IPC]` in `%APPDATA%\AiHelper\settings.ini`:
+```ini
+[IPC]
+Target0=PowerToolWindow
+```
+
 ## HTTP bridge: `GET /open` (clickable links)
 
 Lets a link in a chat open a folder (or highlight a file) in Explorer:
