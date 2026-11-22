@@ -31,6 +31,8 @@
 
 #define APP_NAME      L"AiHelper"
 #define MAX_APPS      64
+#define MAX_TASKS     32
+#define MAX_IPC       32
 #define DEFAULT_PORT  5055
 #define MAX_LINE      4096
 #define MAX_REQ       8192
@@ -50,9 +52,13 @@ static HWND  g_hwnd, g_chkAuto, g_chkBridge, g_edPort, g_list, g_status, g_tab, 
 static wchar_t g_ini[MAX_PATH];
 static wchar_t g_exe[MAX_PATH];
 
-static CRITICAL_SECTION g_cs;           /* guards g_apps/g_appCount */
+static CRITICAL_SECTION g_cs;           /* guards g_apps, g_tasks, g_ipc */
 static wchar_t g_apps[MAX_APPS][MAX_PATH];
 static int     g_appCount;
+static wchar_t g_tasks[MAX_TASKS][MAX_PATH];
+static int     g_taskCount;
+static wchar_t g_ipcTargets[MAX_IPC][MAX_PATH];
+static int     g_ipcCount;
 static int     g_port = DEFAULT_PORT;
 
 /* HTTP bridge config (guarded by g_cs) */
@@ -194,6 +200,20 @@ static void config_load(void)
         swprintf(g_apps[0], MAX_PATH, L"%ls\\explorer.exe", win);
         g_appCount = 1;
     }
+
+    g_taskCount = 0;
+    for (int i = 0; i < MAX_TASKS; i++) {
+        swprintf(key, 32, L"Task%d", i);
+        GetPrivateProfileStringW(L"Tasks", key, L"", g_tasks[g_taskCount], MAX_PATH, g_ini);
+        if (g_tasks[g_taskCount][0]) g_taskCount++;
+    }
+
+    g_ipcCount = 0;
+    for (int i = 0; i < MAX_IPC; i++) {
+        swprintf(key, 32, L"Target%d", i);
+        GetPrivateProfileStringW(L"IPC", key, L"", g_ipcTargets[g_ipcCount], MAX_PATH, g_ini);
+        if (g_ipcTargets[g_ipcCount][0]) g_ipcCount++;
+    }
     LeaveCriticalSection(&g_cs);
     bridge_load();
 }
@@ -278,6 +298,90 @@ static const char *handle_command(char *line)
     if (*p) *p++ = 0;
     while (*p == L' ') p++;
     if (!*name) return "empty command";
+
+    /* --- Task command: task <task_name> --- */
+    if (_wcsicmp(name, L"task") == 0) {
+        if (!*p) return "empty task name";
+        wchar_t task_name[MAX_PATH] = L"";
+        wchar_t *tp = p;
+        if (*tp == L'"') {
+            tp++;
+            wchar_t *endq = wcschr(tp, L'"');
+            if (endq) *endq = 0;
+        } else {
+            wchar_t *sp = wcschr(tp, L' ');
+            if (sp) *sp = 0;
+        }
+        wcsncpy(task_name, tp, MAX_PATH - 1);
+        if (!task_name[0]) return "empty task name";
+
+        BOOL allowed = FALSE;
+        EnterCriticalSection(&g_cs);
+        for (int i = 0; i < g_taskCount; i++) {
+            if (_wcsicmp(g_tasks[i], task_name) == 0) {
+                allowed = TRUE;
+                break;
+            }
+        }
+        LeaveCriticalSection(&g_cs);
+        if (!allowed) return "task not allowed";
+
+        if (getenv("AIHELPER_TEST_NOLAUNCH")) return NULL;
+
+        wchar_t params[MAX_PATH + 32];
+        swprintf(params, sizeof(params)/sizeof(params[0]), L"/run /tn \"%ls\"", task_name);
+        HINSTANCE r = ShellExecuteW(NULL, L"open", L"schtasks.exe", params, NULL, SW_HIDE);
+        if ((INT_PTR)r <= 32) return "task launch failed";
+        return NULL;
+    }
+
+    /* --- IPC command: ipc <target> <message> --- */
+    if (_wcsicmp(name, L"ipc") == 0) {
+        if (!*p) return "empty ipc command";
+        wchar_t *target = p;
+        if (*p == L'"') {
+            target = ++p;
+            while (*p && *p != L'"') p++;
+        } else {
+            while (*p && *p != L' ') p++;
+        }
+        if (*p) *p++ = 0;
+        while (*p == L' ') p++;
+        if (!*target) return "empty ipc target";
+        if (!*p) return "empty ipc message";
+
+        BOOL allowed = FALSE;
+        EnterCriticalSection(&g_cs);
+        for (int i = 0; i < g_ipcCount; i++) {
+            if (_wcsicmp(g_ipcTargets[i], target) == 0) {
+                allowed = TRUE;
+                break;
+            }
+        }
+        LeaveCriticalSection(&g_cs);
+        if (!allowed) return "ipc target not allowed";
+
+        if (getenv("AIHELPER_TEST_NOLAUNCH")) return NULL;
+
+        HWND hwndTarget = FindWindowW(target, NULL);
+        if (!hwndTarget) hwndTarget = FindWindowW(NULL, target);
+        if (!hwndTarget) return "target window not found";
+
+        char utf8_msg[MAX_LINE];
+        int mlen = WideCharToMultiByte(CP_UTF8, 0, p, -1, utf8_msg, sizeof(utf8_msg), NULL, NULL);
+        if (mlen <= 0) return "encoding failed";
+
+        COPYDATASTRUCT cds;
+        cds.dwData = 0;
+        cds.cbData = (DWORD)mlen;
+        cds.lpData = utf8_msg;
+
+        DWORD_PTR dwResult = 0;
+        LRESULT lr = SendMessageTimeoutW(hwndTarget, WM_COPYDATA, (WPARAM)g_hwnd, (LPARAM)&cds,
+                                         SMTO_ABORTIFHUNG, 3000, &dwResult);
+        if (!lr) return "ipc send failed";
+        return NULL;
+    }
 
     wchar_t path[MAX_PATH] = L"";
     EnterCriticalSection(&g_cs);
